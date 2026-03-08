@@ -1,1 +1,1113 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>🔮 Magic Arena</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// ============================================================
+// COLOR UTILITIES
+// ============================================================
+function rgba(c, alphaOverride) {
+  const a = alphaOverride !== undefined ? alphaOverride : (c.a !== undefined ? c.a : 1);
+  return `rgba(${Math.floor(c.r)},${Math.floor(c.g)},${Math.floor(c.b)},${a})`;
+}
+function lighten(c, amount) {
+  return { r: Math.min(255, c.r + amount), g: Math.min(255, c.g + amount), b: Math.min(255, c.b + amount), a: c.a };
+}
+function darken(c, amount) {
+  return { r: Math.max(0, c.r - amount), g: Math.max(0, c.g - amount), b: Math.max(0, c.b - amount), a: c.a };
+}
+function lerpColor(a, b, t) {
+  return { r: a.r+(b.r-a.r)*t, g: a.g+(b.g-a.g)*t, b: a.b+(b.b-a.b)*t, a: (a.a||1)+((b.a||1)-(a.a||1))*t };
+}
+
+// ============================================================
+// COORDINATE TRANSFORM (Isometric)
+// ============================================================
+function worldToScreen(wx, wy, wz, cam, cw, ch) {
+  const rx = (wx - cam.x) * cam.zoom;
+  const ry = (wy - cam.y) * cam.zoom;
+  const sx = cw/2 + rx + cam.offsetX;
+  const sy = ch/2 + ry*0.6 - wz*cam.zoom*0.8 + cam.offsetY;
+  return { sx, sy, scale: cam.zoom };
+}
+
+// ============================================================
+// DRAWING PRIMITIVES
+// ============================================================
+function drawCircle(ctx, x, y, r, fill, stroke, lineWidth) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth||2; ctx.stroke(); }
+}
+function drawEllipse(ctx, x, y, rx, ry, fill, stroke) {
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI*2);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+}
+function drawRoundedRect(ctx, x, y, w, h, r, fill, stroke) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+}
+function drawStar(ctx, cx, cy, spikes, outerR, innerR, fill) {
+  ctx.beginPath();
+  for (let i = 0; i < spikes*2; i++) {
+    const r = i%2===0 ? outerR : innerR;
+    const angle = (i*Math.PI)/spikes - Math.PI/2;
+    const x = cx + Math.cos(angle)*r; const y = cy + Math.sin(angle)*r;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+}
+function drawHexagon(ctx, cx, cy, r, fill, rotation) {
+  rotation = rotation||0;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = (i*Math.PI)/3 + rotation;
+    const x = cx + Math.cos(angle)*r; const y = cy + Math.sin(angle)*r;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+}
+function drawTriangle(ctx, cx, cy, r, fill, rotation) {
+  rotation = rotation||0;
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const angle = (i*Math.PI*2)/3 + rotation - Math.PI/2;
+    const x = cx + Math.cos(angle)*r; const y = cy + Math.sin(angle)*r;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+}
+function drawGlow(ctx, x, y, radius, color, intensity) {
+  intensity = intensity||1;
+  const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  gradient.addColorStop(0, rgba(color, 0.4*intensity));
+  gradient.addColorStop(0.5, rgba(color, 0.15*intensity));
+  gradient.addColorStop(1, rgba(color, 0));
+  ctx.fillStyle = gradient;
+  ctx.fillRect(x-radius, y-radius, radius*2, radius*2);
+}
+function drawShadow(ctx, x, y, rx, ry, alpha) {
+  alpha = alpha||0.3;
+  drawEllipse(ctx, x, y, rx, ry, `rgba(0,0,0,${alpha})`);
+}
+
+// ============================================================
+// RENDER ARENA
+// ============================================================
+function renderArena(ctx, cam, cw, ch, time, arenaRadius) {
+  const bgGrad = ctx.createRadialGradient(cw/2, ch/2, 0, cw/2, ch/2, Math.max(cw,ch));
+  bgGrad.addColorStop(0, '#1a0a2e'); bgGrad.addColorStop(0.5, '#0d0520'); bgGrad.addColorStop(1, '#050210');
+  ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, cw, ch);
+  const starSeed = 12345;
+  for (let i = 0; i < 120; i++) {
+    const sx = ((starSeed*(i+1)*7919) % cw);
+    const sy = ((starSeed*(i+1)*6271) % ch);
+    const twinkle = Math.sin(time*2+i*0.7)*0.5+0.5;
+    const size = 1+(i%3)*0.5;
+    ctx.globalAlpha = 0.3+twinkle*0.5;
+    drawCircle(ctx, sx, sy, size, '#ffffff');
+  }
+  ctx.globalAlpha = 1;
+  const gc = worldToScreen(0, 0, 0, cam, cw, ch);
+  const groundRx = arenaRadius*cam.zoom;
+  const groundRy = arenaRadius*cam.zoom*0.6;
+  for (let layer = 3; layer >= 0; layer--) {
+    const expand = layer*8; const alpha = 0.15-layer*0.03;
+    drawEllipse(ctx, gc.sx, gc.sy, groundRx+expand, groundRy+expand, `rgba(100,50,200,${alpha})`, `rgba(150,80,255,${alpha})`);
+  }
+  const groundGrad = ctx.createRadialGradient(gc.sx, gc.sy, 0, gc.sx, gc.sy, groundRx);
+  groundGrad.addColorStop(0, '#2a1545'); groundGrad.addColorStop(0.5, '#1e0f35');
+  groundGrad.addColorStop(0.85, '#150a28'); groundGrad.addColorStop(1, '#0a0515');
+  ctx.beginPath(); ctx.ellipse(gc.sx, gc.sy, groundRx, groundRy, 0, 0, Math.PI*2);
+  ctx.fillStyle = groundGrad; ctx.fill();
+  ctx.strokeStyle = 'rgba(150,80,255,0.4)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.globalAlpha = 0.08;
+  const gridSize = 60;
+  for (let gx = -arenaRadius; gx <= arenaRadius; gx += gridSize) {
+    const p1 = worldToScreen(gx, -arenaRadius, 0, cam, cw, ch);
+    const p2 = worldToScreen(gx, arenaRadius, 0, cam, cw, ch);
+    ctx.beginPath(); ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy);
+    ctx.strokeStyle = '#8844cc'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  for (let gy = -arenaRadius; gy <= arenaRadius; gy += gridSize) {
+    const p1 = worldToScreen(-arenaRadius, gy, 0, cam, cw, ch);
+    const p2 = worldToScreen(arenaRadius, gy, 0, cam, cw, ch);
+    ctx.beginPath(); ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy);
+    ctx.strokeStyle = '#8844cc'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (let ring = 1; ring <= 3; ring++) {
+    const ringR = arenaRadius*(ring/4);
+    const rp = worldToScreen(0, 0, 0, cam, cw, ch);
+    const rrx = ringR*cam.zoom; const rry = ringR*cam.zoom*0.6;
+    ctx.beginPath(); ctx.ellipse(rp.sx, rp.sy, rrx, rry, 0, 0, Math.PI*2);
+    ctx.strokeStyle = `rgba(100,60,200,${0.12+Math.sin(time+ring)*0.05})`;
+    ctx.lineWidth = 1.5; ctx.setLineDash([8,12]); ctx.stroke(); ctx.setLineDash([]);
+  }
+  const runeCount = 8;
+  for (let i = 0; i < runeCount; i++) {
+    const angle = (i/runeCount)*Math.PI*2+time*0.1;
+    const d = arenaRadius*0.65;
+    const rx = Math.cos(angle)*d; const ry = Math.sin(angle)*d;
+    const rp = worldToScreen(rx, ry, 0, cam, cw, ch);
+    const glow = Math.sin(time*2+i*Math.PI/4)*0.3+0.5;
+    ctx.globalAlpha = glow*0.4;
+    drawHexagon(ctx, rp.sx, rp.sy, 8*cam.zoom, `rgba(180,100,255,${glow})`);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// RENDER ENVIRONMENT OBJECTS
+// ============================================================
+function renderEnvironmentObject(ctx, obj, cam, cw, ch, time) {
+  const p = worldToScreen(obj.x, obj.y, obj.z, cam, cw, ch);
+  const s = cam.zoom*obj.scale;
+  const bob = Math.sin(time*2+obj.bobTimer)*3;
+  switch (obj.type) {
+    case 'pillar': {
+      drawShadow(ctx, p.sx, p.sy+30*s, 15*s, 8*s, 0.3);
+      const pillarGrad = ctx.createLinearGradient(p.sx-10*s, p.sy, p.sx+10*s, p.sy);
+      pillarGrad.addColorStop(0, rgba(darken(obj.color,40))); pillarGrad.addColorStop(0.5, rgba(lighten(obj.color,30))); pillarGrad.addColorStop(1, rgba(darken(obj.color,40)));
+      ctx.fillStyle = pillarGrad; ctx.fillRect(p.sx-10*s, p.sy-50*s, 20*s, 60*s);
+      drawEllipse(ctx, p.sx, p.sy-50*s, 14*s, 6*s, rgba(lighten(obj.color,50)));
+      const cGlow = Math.sin(time*3+obj.bobTimer)*0.3+0.7;
+      drawGlow(ctx, p.sx, p.sy-60*s+bob, 25*s, obj.secondaryColor, cGlow);
+      drawCircle(ctx, p.sx, p.sy-60*s+bob, 6*s, rgba(obj.secondaryColor), rgba(lighten(obj.secondaryColor,80)), 2); break;
+    }
+    case 'crystal': {
+      drawShadow(ctx, p.sx, p.sy+10*s, 12*s, 6*s, 0.25);
+      const cGlow = Math.sin(time*2.5+obj.bobTimer)*0.3+0.7;
+      drawGlow(ctx, p.sx, p.sy-15*s+bob, 35*s, obj.color, cGlow*obj.glowIntensity);
+      ctx.beginPath(); ctx.moveTo(p.sx, p.sy-30*s+bob); ctx.lineTo(p.sx+12*s, p.sy-8*s+bob); ctx.lineTo(p.sx, p.sy+5*s+bob); ctx.lineTo(p.sx-12*s, p.sy-8*s+bob); ctx.closePath();
+      const crystGrad = ctx.createLinearGradient(p.sx, p.sy-30*s, p.sx, p.sy+5*s);
+      crystGrad.addColorStop(0, rgba(lighten(obj.color,80))); crystGrad.addColorStop(0.5, rgba(obj.color)); crystGrad.addColorStop(1, rgba(darken(obj.color,40)));
+      ctx.fillStyle = crystGrad; ctx.fill(); ctx.strokeStyle = rgba(lighten(obj.color,100),0.6); ctx.lineWidth = 1.5; ctx.stroke(); break;
+    }
+    case 'torch': {
+      drawShadow(ctx, p.sx, p.sy+5*s, 8*s, 4*s, 0.2);
+      ctx.fillStyle = '#5c3a1e'; ctx.fillRect(p.sx-3*s, p.sy-25*s, 6*s, 30*s);
+      const flicker = Math.sin(time*8+obj.bobTimer)*3+Math.cos(time*12+obj.bobTimer*2)*2;
+      drawGlow(ctx, p.sx+flicker*0.3, p.sy-32*s, 30*s, {r:255,g:150,b:30}, 0.6+Math.sin(time*5)*0.2);
+      drawCircle(ctx, p.sx+flicker*0.3, p.sy-32*s, 7*s+flicker*0.5, 'rgba(255,200,50,0.9)');
+      drawCircle(ctx, p.sx+flicker*0.2, p.sy-34*s, 4*s, 'rgba(255,255,200,0.9)'); break;
+    }
+    case 'fountain': {
+      drawShadow(ctx, p.sx, p.sy+5*s, 25*s, 12*s, 0.25);
+      drawEllipse(ctx, p.sx, p.sy, 25*s, 12*s, rgba(darken(obj.color,30)), rgba(obj.color));
+      drawEllipse(ctx, p.sx, p.sy-5*s, 20*s, 10*s, rgba(obj.color));
+      const waterGlow = Math.sin(time*3)*0.2+0.6;
+      drawGlow(ctx, p.sx, p.sy-15*s, 20*s, {r:80,g:180,b:255}, waterGlow);
+      for (let i = 0; i < 5; i++) {
+        const wa = (i/5)*Math.PI*2+time*3; const wr = 8*s;
+        const wx = p.sx+Math.cos(wa)*wr; const wy = p.sy-15*s+Math.sin(wa)*wr*0.4-Math.abs(Math.sin(time*4+i))*10*s;
+        drawCircle(ctx, wx, wy, 2.5*s, 'rgba(100,200,255,0.7)');
+      } break;
+    }
+    case 'mushroom': {
+      drawShadow(ctx, p.sx, p.sy+3*s, 10*s, 5*s, 0.2);
+      ctx.fillStyle = '#e8dcc8'; ctx.fillRect(p.sx-4*s, p.sy-12*s, 8*s, 15*s);
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-14*s, 12*s, Math.PI, 0); ctx.fillStyle = rgba(obj.color); ctx.fill();
+      const dotColor = rgba(lighten(obj.color,100));
+      drawCircle(ctx, p.sx-5*s, p.sy-18*s, 2.5*s, dotColor); drawCircle(ctx, p.sx+4*s, p.sy-20*s, 2*s, dotColor); drawCircle(ctx, p.sx+1*s, p.sy-16*s, 1.5*s, dotColor);
+      const mGlow = Math.sin(time*2+obj.bobTimer)*0.2+0.3;
+      drawGlow(ctx, p.sx, p.sy-14*s, 20*s, obj.color, mGlow); break;
+    }
+    case 'rock': {
+      drawShadow(ctx, p.sx, p.sy+5*s, 15*s, 7*s, 0.25);
+      ctx.beginPath(); ctx.moveTo(p.sx-14*s, p.sy+2*s); ctx.lineTo(p.sx-10*s, p.sy-12*s); ctx.lineTo(p.sx+2*s, p.sy-18*s); ctx.lineTo(p.sx+13*s, p.sy-8*s); ctx.lineTo(p.sx+15*s, p.sy+3*s); ctx.closePath();
+      const rockGrad = ctx.createLinearGradient(p.sx-14*s, p.sy-18*s, p.sx+15*s, p.sy+3*s);
+      rockGrad.addColorStop(0, rgba(lighten(obj.color,20))); rockGrad.addColorStop(1, rgba(darken(obj.color,30)));
+      ctx.fillStyle = rockGrad; ctx.fill(); ctx.strokeStyle = rgba(darken(obj.color,50)); ctx.lineWidth = 1; ctx.stroke(); break;
+    }
+  }
+}
+
+// ============================================================
+// RENDER PLAYER
+// ============================================================
+function renderPlayer(ctx, player, cam, cw, ch, time) {
+  const bob = Math.sin(player.bobTimer*6)*(player.isMoving ? 4 : 1.5);
+  const p = worldToScreen(player.x, player.y, player.z+bob, cam, cw, ch);
+  const s = cam.zoom;
+  if (player.invincibleTimer > 0 && Math.floor(player.invincibleTimer*10)%2===0) ctx.globalAlpha = 0.5;
+  if (player.isDashing) {
+    ctx.globalAlpha = 0.3;
+    for (let i = 1; i <= 3; i++) {
+      const tx = player.x-player.dashDir.x*i*15; const ty = player.y-player.dashDir.y*i*15;
+      const tp = worldToScreen(tx, ty, player.z, cam, cw, ch);
+      drawCircle(ctx, tp.sx, tp.sy, 18*s*(1-i*0.2), rgba(player.bodyColor,0.3));
+    }
+    ctx.globalAlpha = 1;
+  }
+  drawShadow(ctx, p.sx, p.sy+28*s, 20*s, 8*s, 0.35);
+  if (player.shield > 0) {
+    const shieldAlpha = 0.15+Math.sin(time*4)*0.05;
+    drawCircle(ctx, p.sx, p.sy-10*s, 32*s, `rgba(80,180,255,${shieldAlpha})`, 'rgba(100,200,255,0.4)', 2);
+  }
+  const bodyGrad = ctx.createRadialGradient(p.sx-4*s, p.sy-14*s, 2*s, p.sx, p.sy-8*s, 22*s);
+  bodyGrad.addColorStop(0, rgba(lighten(player.bodyColor,60))); bodyGrad.addColorStop(0.6, rgba(player.bodyColor)); bodyGrad.addColorStop(1, rgba(darken(player.bodyColor,50)));
+  drawCircle(ctx, p.sx, p.sy-8*s, 20*s, ''); ctx.fillStyle = bodyGrad; ctx.fill();
+  ctx.strokeStyle = rgba(darken(player.bodyColor,70)); ctx.lineWidth = 2.5*s; ctx.stroke();
+  ctx.fillStyle = '#8B6914'; ctx.fillRect(p.sx-18*s, p.sy-2*s, 36*s, 5*s);
+  drawCircle(ctx, p.sx, p.sy, 4*s, '#FFD700', '#8B6914', 1);
+  const eyeOffX = Math.cos(player.angle)*5*s; const eyeOffY = Math.sin(player.angle)*2*s;
+  drawCircle(ctx, p.sx-7*s+eyeOffX*0.3, p.sy-14*s+eyeOffY*0.3, 5*s, '#ffffff', '#333', 1);
+  drawCircle(ctx, p.sx+7*s+eyeOffX*0.3, p.sy-14*s+eyeOffY*0.3, 5*s, '#ffffff', '#333', 1);
+  drawCircle(ctx, p.sx-7*s+eyeOffX*0.6, p.sy-14*s+eyeOffY*0.6, 2.5*s, '#1a1a2e');
+  drawCircle(ctx, p.sx+7*s+eyeOffX*0.6, p.sy-14*s+eyeOffY*0.6, 2.5*s, '#1a1a2e');
+  drawCircle(ctx, p.sx-8*s+eyeOffX*0.4, p.sy-15*s+eyeOffY*0.4, 1.2*s, '#ffffff');
+  drawCircle(ctx, p.sx+6*s+eyeOffX*0.4, p.sy-15*s+eyeOffY*0.4, 1.2*s, '#ffffff');
+  ctx.beginPath(); ctx.arc(p.sx+eyeOffX*0.2, p.sy-7*s, 4*s, 0.1, Math.PI-0.1);
+  ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 1.5*s; ctx.stroke();
+  const hatTilt = Math.sin(player.bobTimer*6)*0.08;
+  ctx.save(); ctx.translate(p.sx, p.sy-26*s); ctx.rotate(hatTilt);
+  drawEllipse(ctx, 0, 2*s, 24*s, 7*s, rgba(darken(player.hatColor,20)));
+  ctx.beginPath(); ctx.moveTo(-18*s, 2*s); ctx.quadraticCurveTo(-8*s, -25*s, 5*s, -40*s); ctx.quadraticCurveTo(10*s, -42*s, 8*s, -38*s); ctx.lineTo(18*s, 2*s); ctx.closePath();
+  const hatGrad = ctx.createLinearGradient(-18*s, 0, 18*s, 0);
+  hatGrad.addColorStop(0, rgba(darken(player.hatColor,30))); hatGrad.addColorStop(0.5, rgba(lighten(player.hatColor,20))); hatGrad.addColorStop(1, rgba(darken(player.hatColor,40)));
+  ctx.fillStyle = hatGrad; ctx.fill(); ctx.strokeStyle = rgba(darken(player.hatColor,60)); ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#FFD700'; ctx.fillRect(-17*s, -2*s, 34*s, 4*s);
+  drawStar(ctx, 0, -4*s, 5, 5*s, 2.5*s, '#FFD700');
+  const tipGlow = Math.sin(time*3)*0.3+0.7;
+  drawGlow(ctx, 6*s, -39*s, 15*s, {r:255,g:220,b:80}, tipGlow);
+  drawCircle(ctx, 6*s, -39*s, 3*s, `rgba(255,255,200,${tipGlow})`);
+  ctx.restore();
+  const staffAngle = player.angle;
+  const staffBaseX = p.sx+Math.cos(staffAngle)*20*s; const staffBaseY = p.sy-5*s+Math.sin(staffAngle)*10*s;
+  const staffTipX = p.sx+Math.cos(staffAngle)*38*s; const staffTipY = p.sy-20*s+Math.sin(staffAngle)*15*s;
+  ctx.beginPath(); ctx.moveTo(staffBaseX, staffBaseY); ctx.lineTo(staffTipX, staffTipY);
+  ctx.strokeStyle = '#6B3A1F'; ctx.lineWidth = 4*s; ctx.stroke();
+  ctx.strokeStyle = '#8B5A2F'; ctx.lineWidth = 2.5*s; ctx.stroke();
+  const orbGlow = player.staffGlow+Math.sin(time*4)*0.3;
+  drawGlow(ctx, staffTipX, staffTipY, 25*s, {r:180,g:100,b:255}, orbGlow);
+  drawCircle(ctx, staffTipX, staffTipY, 7*s, 'rgba(200,150,255,0.9)', 'rgba(255,200,255,0.8)', 2);
+  drawCircle(ctx, staffTipX-2*s, staffTipY-2*s, 3*s, 'rgba(255,255,255,0.7)');
+  for (let i = 0; i < 3; i++) {
+    const orbA = player.orbAngle+(i*Math.PI*2)/3; const orbDist = 28*s;
+    const ox = p.sx+Math.cos(orbA)*orbDist; const oy = p.sy-8*s+Math.sin(orbA)*orbDist*0.4;
+    const colors = [{r:255,g:100,b:50},{r:50,g:150,b:255},{r:100,g:255,b:100}];
+    drawGlow(ctx, ox, oy, 10*s, colors[i], 0.5+Math.sin(time*3+i)*0.2);
+    drawCircle(ctx, ox, oy, 3.5*s, rgba(colors[i]), rgba(lighten(colors[i],80)), 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// RENDER ENEMY
+// ============================================================
+function renderEnemy(ctx, enemy, cam, cw, ch, time) {
+  if (enemy.isDead && enemy.deathAnim <= 0) return;
+  const bob = Math.sin(enemy.bobTimer*4+enemy.id)*3;
+  const p = worldToScreen(enemy.x, enemy.y, enemy.z+bob, cam, cw, ch);
+  const s = cam.zoom*enemy.scale;
+  if (enemy.isDead) { ctx.globalAlpha = enemy.deathAnim; const ds = 1+(1-enemy.deathAnim)*0.5; ctx.save(); ctx.translate(p.sx,p.sy); ctx.scale(ds,ds); ctx.translate(-p.sx,-p.sy); }
+  if (enemy.spawnAnim < 1) { ctx.globalAlpha = enemy.spawnAnim; const ss = 0.3+enemy.spawnAnim*0.7; ctx.save(); ctx.translate(p.sx,p.sy); ctx.scale(ss,ss); ctx.translate(-p.sx,-p.sy); }
+  if (enemy.frozen) ctx.globalAlpha *= 0.8;
+  if (enemy.hitFlash > 0) ctx.globalAlpha = 0.6+enemy.hitFlash*0.4;
+  drawShadow(ctx, p.sx, p.sy+22*s, 16*s, 7*s, 0.3);
+  if (enemy.isBoss) {
+    const auraGlow = Math.sin(time*3)*0.2+0.5;
+    drawGlow(ctx, p.sx, p.sy-5*s, 50*s, enemy.color, auraGlow);
+    for (let i = 0; i < 6; i++) {
+      const da = time*2+(i*Math.PI)/3; const dd = 35*s;
+      const dx = p.sx+Math.cos(da)*dd; const dy = p.sy-5*s+Math.sin(da)*dd*0.5;
+      drawStar(ctx, dx, dy, 4, 4*s, 2*s, rgba(enemy.color, 0.5+Math.sin(time*4+i)*0.3));
+    }
+  }
+  switch (enemy.type) {
+    case 'slime': {
+      const squish = Math.sin(enemy.bobTimer*5)*0.1;
+      const bW = 22*s*(1+squish); const bH = 18*s*(1-squish);
+      const slimeGrad = ctx.createRadialGradient(p.sx-4*s, p.sy-10*s, 2, p.sx, p.sy, bW);
+      slimeGrad.addColorStop(0, rgba(lighten(enemy.color,80))); slimeGrad.addColorStop(0.7, rgba(enemy.color)); slimeGrad.addColorStop(1, rgba(darken(enemy.color,40)));
+      drawEllipse(ctx, p.sx, p.sy-5*s, bW, bH, ''); ctx.fillStyle = slimeGrad; ctx.fill();
+      ctx.strokeStyle = rgba(darken(enemy.color,60)); ctx.lineWidth = 2*s; ctx.stroke();
+      drawCircle(ctx, p.sx-6*s, p.sy-12*s, 4*s, 'rgba(255,255,255,0.4)');
+      drawCircle(ctx, p.sx-6*s, p.sy-8*s, 4*s, '#ffffff'); drawCircle(ctx, p.sx+6*s, p.sy-8*s, 4*s, '#ffffff');
+      drawCircle(ctx, p.sx-5*s, p.sy-7*s, 2*s, '#111'); drawCircle(ctx, p.sx+7*s, p.sy-7*s, 2*s, '#111');
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-2*s, 5*s, 0, Math.PI); ctx.fillStyle = rgba(darken(enemy.color,80)); ctx.fill(); break;
+    }
+    case 'ghost': {
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-10*s, 18*s, Math.PI, 0);
+      const waveAmp = 4*s;
+      for (let wx = 0; wx <= 1; wx += 0.05) {
+        const gx = p.sx+18*s-wx*36*s; const gy = p.sy+8*s+Math.sin(wx*Math.PI*4+time*5)*waveAmp;
+        ctx.lineTo(gx, gy);
+      }
+      ctx.closePath();
+      const ghostGrad = ctx.createRadialGradient(p.sx, p.sy-15*s, 2, p.sx, p.sy, 25*s);
+      ghostGrad.addColorStop(0, 'rgba(255,255,255,0.95)'); ghostGrad.addColorStop(0.6, rgba(enemy.color,0.85)); ghostGrad.addColorStop(1, rgba(enemy.color,0.4));
+      ctx.fillStyle = ghostGrad; ctx.fill();
+      drawGlow(ctx, p.sx, p.sy-5*s, 30*s, enemy.color, 0.3);
+      drawCircle(ctx, p.sx-7*s, p.sy-12*s, 5*s, rgba(enemy.eyeColor)); drawCircle(ctx, p.sx+7*s, p.sy-12*s, 5*s, rgba(enemy.eyeColor));
+      drawCircle(ctx, p.sx-7*s, p.sy-12*s, 2.5*s, '#000'); drawCircle(ctx, p.sx+7*s, p.sy-12*s, 2.5*s, '#000');
+      drawEllipse(ctx, p.sx, p.sy-3*s, 5*s, 4*s, '#333'); break;
+    }
+    case 'golem': {
+      const golemGrad = ctx.createLinearGradient(p.sx-22*s, p.sy-30*s, p.sx+22*s, p.sy+10*s);
+      golemGrad.addColorStop(0, rgba(lighten(enemy.color,30))); golemGrad.addColorStop(1, rgba(darken(enemy.color,40)));
+      drawRoundedRect(ctx, p.sx-20*s, p.sy-25*s, 40*s, 35*s, 8*s, ''); ctx.fillStyle = golemGrad; ctx.fill();
+      ctx.strokeStyle = rgba(darken(enemy.color,60)); ctx.lineWidth = 2.5*s; ctx.stroke();
+      ctx.strokeStyle = rgba(darken(enemy.color,30),0.5); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(p.sx-12*s, p.sy-20*s); ctx.lineTo(p.sx+5*s, p.sy-10*s); ctx.moveTo(p.sx-15*s, p.sy-5*s); ctx.lineTo(p.sx+10*s, p.sy+2*s); ctx.stroke();
+      drawRoundedRect(ctx, p.sx-28*s, p.sy-15*s, 10*s, 20*s, 4*s, rgba(darken(enemy.color,10)));
+      drawRoundedRect(ctx, p.sx+18*s, p.sy-15*s, 10*s, 20*s, 4*s, rgba(darken(enemy.color,10)));
+      const eyeGlow = Math.sin(time*3+enemy.id)*0.3+0.7;
+      drawGlow(ctx, p.sx-8*s, p.sy-15*s, 10*s, enemy.eyeColor, eyeGlow); drawCircle(ctx, p.sx-8*s, p.sy-15*s, 4*s, rgba(enemy.eyeColor));
+      drawGlow(ctx, p.sx+8*s, p.sy-15*s, 10*s, enemy.eyeColor, eyeGlow); drawCircle(ctx, p.sx+8*s, p.sy-15*s, 4*s, rgba(enemy.eyeColor));
+      ctx.fillStyle = '#333'; ctx.fillRect(p.sx-8*s, p.sy-5*s, 16*s, 3*s); break;
+    }
+    case 'bat': {
+      drawCircle(ctx, p.sx, p.sy-5*s, 12*s, rgba(enemy.color), rgba(darken(enemy.color,40)), 2);
+      const wingFlap = Math.sin(enemy.bobTimer*10)*0.5;
+      ctx.save(); ctx.translate(p.sx-13*s, p.sy-8*s); ctx.rotate(-0.3+wingFlap);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.quadraticCurveTo(-20*s,-15*s,-25*s,0); ctx.quadraticCurveTo(-15*s,5*s,0,0);
+      ctx.fillStyle = rgba(darken(enemy.color,20)); ctx.fill(); ctx.restore();
+      ctx.save(); ctx.translate(p.sx+13*s, p.sy-8*s); ctx.rotate(0.3-wingFlap);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.quadraticCurveTo(20*s,-15*s,25*s,0); ctx.quadraticCurveTo(15*s,5*s,0,0);
+      ctx.fillStyle = rgba(darken(enemy.color,20)); ctx.fill(); ctx.restore();
+      drawCircle(ctx, p.sx-5*s, p.sy-8*s, 3*s, rgba(enemy.eyeColor)); drawCircle(ctx, p.sx+5*s, p.sy-8*s, 3*s, rgba(enemy.eyeColor));
+      drawCircle(ctx, p.sx-5*s, p.sy-8*s, 1.5*s, '#000'); drawCircle(ctx, p.sx+5*s, p.sy-8*s, 1.5*s, '#000');
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.moveTo(p.sx-3*s, p.sy-2*s); ctx.lineTo(p.sx-1*s, p.sy+4*s); ctx.lineTo(p.sx+1*s, p.sy-2*s); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.sx+1*s, p.sy-2*s); ctx.lineTo(p.sx+3*s, p.sy+4*s); ctx.lineTo(p.sx+5*s, p.sy-2*s); ctx.fill(); break;
+    }
+    case 'skeleton': {
+      drawCircle(ctx, p.sx, p.sy-18*s, 12*s, '#e8dcc0', '#8a7a60', 2);
+      drawCircle(ctx, p.sx-5*s, p.sy-20*s, 4*s, '#1a1a1a'); drawCircle(ctx, p.sx+5*s, p.sy-20*s, 4*s, '#1a1a1a');
+      drawCircle(ctx, p.sx-5*s, p.sy-20*s, 2*s, rgba(enemy.eyeColor)); drawCircle(ctx, p.sx+5*s, p.sy-20*s, 2*s, rgba(enemy.eyeColor));
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-14*s, 8*s, 0.2, Math.PI-0.2); ctx.strokeStyle = '#8a7a60'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.strokeStyle = '#d4c8a8'; ctx.lineWidth = 2*s;
+      for (let i = 0; i < 3; i++) { const ry = p.sy-5*s+i*5*s; ctx.beginPath(); ctx.ellipse(p.sx, ry, 10*s, 3*s, 0, 0, Math.PI); ctx.stroke(); }
+      ctx.beginPath(); ctx.moveTo(p.sx, p.sy-8*s); ctx.lineTo(p.sx, p.sy+8*s); ctx.strokeStyle = '#d4c8a8'; ctx.lineWidth = 3*s; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p.sx+15*s, p.sy-5*s); ctx.lineTo(p.sx+25*s, p.sy-25*s); ctx.strokeStyle = '#c0c0c0'; ctx.lineWidth = 2.5*s; ctx.stroke();
+      drawCircle(ctx, p.sx+25*s, p.sy-26*s, 2*s, '#fff'); break;
+    }
+    case 'wizard': {
+      const wizGrad = ctx.createRadialGradient(p.sx, p.sy-10*s, 3, p.sx, p.sy, 25*s);
+      wizGrad.addColorStop(0, rgba(lighten(enemy.color,40))); wizGrad.addColorStop(1, rgba(darken(enemy.color,30)));
+      drawCircle(ctx, p.sx, p.sy-5*s, 22*s, ''); ctx.fillStyle = wizGrad; ctx.fill();
+      ctx.strokeStyle = rgba(darken(enemy.color,60)); ctx.lineWidth = 2.5; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p.sx-20*s, p.sy-24*s); ctx.lineTo(p.sx, p.sy-55*s); ctx.lineTo(p.sx+20*s, p.sy-24*s); ctx.closePath();
+      const evilHatGrad = ctx.createLinearGradient(p.sx, p.sy-55*s, p.sx, p.sy-24*s);
+      evilHatGrad.addColorStop(0, rgba(darken(enemy.color,50))); evilHatGrad.addColorStop(1, rgba(enemy.color));
+      ctx.fillStyle = evilHatGrad; ctx.fill();
+      drawEllipse(ctx, p.sx, p.sy-24*s, 26*s, 7*s, rgba(darken(enemy.color,30)));
+      const evilGlow = Math.sin(time*4+enemy.id)*0.3+0.7;
+      drawGlow(ctx, p.sx-8*s, p.sy-12*s, 12*s, enemy.eyeColor, evilGlow); drawGlow(ctx, p.sx+8*s, p.sy-12*s, 12*s, enemy.eyeColor, evilGlow);
+      drawCircle(ctx, p.sx-8*s, p.sy-12*s, 5*s, rgba(enemy.eyeColor)); drawCircle(ctx, p.sx+8*s, p.sy-12*s, 5*s, rgba(enemy.eyeColor));
+      drawCircle(ctx, p.sx-8*s, p.sy-12*s, 2*s, '#fff'); drawCircle(ctx, p.sx+8*s, p.sy-12*s, 2*s, '#fff');
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-1*s, 6*s, Math.PI+0.3, -0.3); ctx.strokeStyle = rgba(darken(enemy.color,80)); ctx.lineWidth = 2; ctx.stroke();
+      const eStaffX = p.sx+25*s;
+      ctx.beginPath(); ctx.moveTo(eStaffX, p.sy+10*s); ctx.lineTo(eStaffX, p.sy-35*s); ctx.strokeStyle = '#4a2a0a'; ctx.lineWidth = 4*s; ctx.stroke();
+      drawGlow(ctx, eStaffX, p.sy-38*s, 20*s, enemy.eyeColor, 0.6+Math.sin(time*5)*0.3);
+      drawCircle(ctx, eStaffX, p.sy-38*s, 6*s, rgba(enemy.eyeColor)); break;
+    }
+    case 'dragon': {
+      const dragGrad = ctx.createRadialGradient(p.sx, p.sy-10*s, 5, p.sx, p.sy+5*s, 30*s);
+      dragGrad.addColorStop(0, rgba(lighten(enemy.color,40))); dragGrad.addColorStop(1, rgba(darken(enemy.color,30)));
+      drawEllipse(ctx, p.sx, p.sy-5*s, 25*s, 18*s, ''); ctx.fillStyle = dragGrad; ctx.fill();
+      ctx.strokeStyle = rgba(darken(enemy.color,50)); ctx.lineWidth = 2; ctx.stroke();
+      drawEllipse(ctx, p.sx, p.sy, 15*s, 10*s, rgba(lighten(enemy.color,60),0.5));
+      const dWingFlap = Math.sin(time*4+enemy.id)*0.4;
+      ctx.save(); ctx.translate(p.sx-20*s, p.sy-12*s); ctx.rotate(-0.5+dWingFlap);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-30*s,-25*s); ctx.lineTo(-20*s,-5*s); ctx.lineTo(-35*s,-15*s); ctx.lineTo(-15*s,5*s); ctx.closePath();
+      ctx.fillStyle = rgba(darken(enemy.color,10),0.8); ctx.fill(); ctx.restore();
+      ctx.save(); ctx.translate(p.sx+20*s, p.sy-12*s); ctx.rotate(0.5-dWingFlap);
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(30*s,-25*s); ctx.lineTo(20*s,-5*s); ctx.lineTo(35*s,-15*s); ctx.lineTo(15*s,5*s); ctx.closePath();
+      ctx.fillStyle = rgba(darken(enemy.color,10),0.8); ctx.fill(); ctx.restore();
+      drawCircle(ctx, p.sx, p.sy-22*s, 13*s, rgba(enemy.color), rgba(darken(enemy.color,40)), 2);
+      ctx.beginPath(); ctx.moveTo(p.sx-8*s, p.sy-30*s); ctx.lineTo(p.sx-14*s, p.sy-45*s); ctx.lineTo(p.sx-4*s, p.sy-32*s); ctx.fillStyle = rgba(darken(enemy.color,50)); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(p.sx+8*s, p.sy-30*s); ctx.lineTo(p.sx+14*s, p.sy-45*s); ctx.lineTo(p.sx+4*s, p.sy-32*s); ctx.fillStyle = rgba(darken(enemy.color,50)); ctx.fill();
+      drawCircle(ctx, p.sx-5*s, p.sy-25*s, 4*s, rgba(enemy.eyeColor)); drawCircle(ctx, p.sx+5*s, p.sy-25*s, 4*s, rgba(enemy.eyeColor));
+      drawCircle(ctx, p.sx-5*s, p.sy-25*s, 2*s, '#000'); drawCircle(ctx, p.sx+5*s, p.sy-25*s, 2*s, '#000');
+      drawCircle(ctx, p.sx-3*s, p.sy-18*s, 2*s, rgba(darken(enemy.color,60))); drawCircle(ctx, p.sx+3*s, p.sy-18*s, 2*s, rgba(darken(enemy.color,60))); break;
+    }
+    case 'mushroom': {
+      ctx.fillStyle = '#e8dcc0'; drawRoundedRect(ctx, p.sx-8*s, p.sy-5*s, 16*s, 18*s, 4*s, '#e8dcc0');
+      ctx.beginPath(); ctx.arc(p.sx, p.sy-8*s, 18*s, Math.PI, 0); ctx.closePath(); ctx.fillStyle = rgba(enemy.color); ctx.fill();
+      ctx.strokeStyle = rgba(darken(enemy.color,40)); ctx.lineWidth = 2; ctx.stroke();
+      drawCircle(ctx, p.sx-6*s, p.sy-18*s, 4*s, rgba(lighten(enemy.color,80)));
+      drawCircle(ctx, p.sx+8*s, p.sy-14*s, 3*s, rgba(lighten(enemy.color,80)));
+      drawCircle(ctx, p.sx, p.sy-22*s, 3*s, rgba(lighten(enemy.color,80)));
+      drawCircle(ctx, p.sx-5*s, p.sy-2*s, 3*s, '#333'); drawCircle(ctx, p.sx+5*s, p.sy-2*s, 3*s, '#333');
+      ctx.beginPath(); ctx.arc(p.sx, p.sy+4*s, 4*s, 0.2, Math.PI-0.2); ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5; ctx.stroke(); break;
+    }
+  }
+  if (enemy.frozen) {
+    drawCircle(ctx, p.sx, p.sy-8*s, 25*s, 'rgba(100,200,255,0.2)', 'rgba(150,220,255,0.6)', 2);
+    for (let i = 0; i < 4; i++) {
+      const ia = (i/4)*Math.PI*2+time; const ix = p.sx+Math.cos(ia)*18*s; const iy = p.sy-8*s+Math.sin(ia)*12*s;
+      drawStar(ctx, ix, iy, 4, 4*s, 2*s, 'rgba(200,240,255,0.7)');
+    }
+  }
+  if (enemy.burning) {
+    for (let i = 0; i < 3; i++) {
+      const fa = time*6+i*2; const fx = p.sx+Math.sin(fa+i)*10*s; const fy = p.sy-15*s-i*8*s+Math.sin(fa*1.5)*3;
+      drawCircle(ctx, fx, fy, (4-i)*s, `rgba(255,${150-i*40},0,${0.7-i*0.15})`);
+    }
+  }
+  if (enemy.healthBarVisible > 0 && !enemy.isDead) {
+    const hbW = 40*s; const hbH = 5*s; const hbX = p.sx-hbW/2; const hbY = p.sy-(enemy.isBoss?65:40)*s;
+    const hpRatio = enemy.hp/enemy.maxHp;
+    ctx.globalAlpha = Math.min(1, enemy.healthBarVisible);
+    drawRoundedRect(ctx, hbX-1, hbY-1, hbW+2, hbH+2, 3, 'rgba(0,0,0,0.6)');
+    const hpColor = hpRatio > 0.5 ? '#44ff44' : hpRatio > 0.25 ? '#ffaa00' : '#ff3333';
+    drawRoundedRect(ctx, hbX, hbY, hbW*hpRatio, hbH, 2, hpColor);
+    drawRoundedRect(ctx, hbX, hbY, hbW*hpRatio, hbH*0.4, 2, 'rgba(255,255,255,0.2)');
+    ctx.globalAlpha = 1;
+  }
+  if (enemy.isBoss && !enemy.isDead) {
+    ctx.font = `bold ${14*s}px Arial`; ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff4444'; ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
+    const bossNames = {wizard:'🧙 Dark Sorcerer', dragon:'🐉 Elder Dragon', golem:'🗿 Ancient Golem'};
+    const name = bossNames[enemy.type] || '💀 Boss';
+    ctx.strokeText(name, p.sx, p.sy-(enemy.isBoss?72:48)*s); ctx.fillText(name, p.sx, p.sy-(enemy.isBoss?72:48)*s);
+  }
+  if (enemy.isDead || enemy.spawnAnim < 1) ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// RENDER PROJECTILE
+// ============================================================
+function renderProjectile(ctx, proj, cam, cw, ch, time) {
+  const p = worldToScreen(proj.x, proj.y, proj.z, cam, cw, ch);
+  const s = cam.zoom; const lifeRatio = proj.life/proj.maxLife;
+  if (proj.trail.length > 1) {
+    ctx.beginPath();
+    for (let i = 0; i < proj.trail.length; i++) {
+      const tp = worldToScreen(proj.trail[i].x, proj.trail[i].y, proj.trail[i].z, cam, cw, ch);
+      const alpha = (i/proj.trail.length)*0.6*lifeRatio;
+      if (i===0) ctx.moveTo(tp.sx, tp.sy); else ctx.lineTo(tp.sx, tp.sy);
+      ctx.strokeStyle = rgba(proj.color, alpha); ctx.lineWidth = (i/proj.trail.length)*proj.radius*s*2;
+    }
+    ctx.stroke();
+  }
+  drawGlow(ctx, p.sx, p.sy, proj.radius*s*4, proj.color, 0.6*lifeRatio);
+  switch (proj.spell) {
+    case 'fireball': {
+      const fireGrad = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, proj.radius*s*2);
+      fireGrad.addColorStop(0,'rgba(255,255,200,0.95)'); fireGrad.addColorStop(0.3,rgba(proj.color,0.9)); fireGrad.addColorStop(0.7,rgba(proj.secondaryColor,0.6)); fireGrad.addColorStop(1,'rgba(255,50,0,0)');
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s*2, ''); ctx.fillStyle = fireGrad; ctx.fill(); break;
+    }
+    case 'iceShard': {
+      ctx.save(); ctx.translate(p.sx, p.sy); ctx.rotate(time*5);
+      drawStar(ctx, 0, 0, 6, proj.radius*s*1.8, proj.radius*s*0.8, rgba(proj.color,0.9));
+      drawStar(ctx, 0, 0, 6, proj.radius*s*1.2, proj.radius*s*0.5, 'rgba(200,240,255,0.9)');
+      ctx.restore(); break;
+    }
+    case 'lightning': {
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s*1.5, rgba(proj.color,0.8));
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s*0.8, 'rgba(255,255,255,0.9)');
+      for (let i = 0; i < 4; i++) {
+        const la = time*10+i*Math.PI/2; const lr = proj.radius*s*3;
+        ctx.beginPath(); ctx.moveTo(p.sx, p.sy);
+        const midX = p.sx+Math.cos(la)*lr*0.5+(Math.random()-0.5)*8; const midY = p.sy+Math.sin(la)*lr*0.5+(Math.random()-0.5)*8;
+        ctx.lineTo(midX, midY); ctx.lineTo(p.sx+Math.cos(la)*lr, p.sy+Math.sin(la)*lr);
+        ctx.strokeStyle = rgba(proj.color,0.6); ctx.lineWidth = 1.5; ctx.stroke();
+      } break;
+    }
+    case 'arcaneNova': {
+      const novaProgress = 1-lifeRatio; const novaR = proj.aoe*s*novaProgress;
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, novaR, 0, Math.PI*2);
+      ctx.strokeStyle = rgba(proj.color, lifeRatio*0.8); ctx.lineWidth = 4*s*lifeRatio; ctx.stroke();
+      ctx.fillStyle = rgba(proj.color, lifeRatio*0.15); ctx.fill();
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, novaR*0.6, 0, Math.PI*2);
+      ctx.strokeStyle = rgba(proj.secondaryColor, lifeRatio*0.5); ctx.lineWidth = 2*s; ctx.stroke(); break;
+    }
+    case 'voidBeam': {
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s*2, rgba(proj.color,0.7));
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s, rgba(proj.secondaryColor,0.9));
+      for (let i = 0; i < 3; i++) {
+        const va = time*8+i*2; const vd = proj.radius*s*2.5;
+        drawCircle(ctx, p.sx+Math.cos(va)*vd, p.sy+Math.sin(va)*vd, 2*s, rgba(proj.color,0.5));
+      } break;
+    }
+    case 'healAura': {
+      const healR = proj.aoe*s*(1-lifeRatio);
+      drawGlow(ctx, p.sx, p.sy, healR, {r:50,g:255,b:100}, lifeRatio*0.4);
+      ctx.strokeStyle = rgba({r:100,g:255,b:150}, lifeRatio*0.6); ctx.lineWidth = 3*s;
+      ctx.beginPath(); ctx.moveTo(p.sx, p.sy-8*s); ctx.lineTo(p.sx, p.sy+8*s); ctx.moveTo(p.sx-8*s, p.sy); ctx.lineTo(p.sx+8*s, p.sy); ctx.stroke(); break;
+    }
+    default: {
+      drawCircle(ctx, p.sx, p.sy, proj.radius*s*1.5, rgba(proj.color,0.8)); break;
+    }
+  }
+}
+
+// ============================================================
+// RENDER PARTICLE
+// ============================================================
+function renderParticle(ctx, part, cam, cw, ch) {
+  const p = worldToScreen(part.x, part.y, part.z, cam, cw, ch);
+  const lifeRatio = part.life/part.maxLife;
+  const size = part.shrink ? part.size*lifeRatio*cam.zoom : part.size*cam.zoom;
+  const alpha = lifeRatio*(part.color.a||1);
+  if (size <= 0.5 || alpha <= 0.01) return;
+  ctx.globalAlpha = alpha;
+  if (part.glow) drawGlow(ctx, p.sx, p.sy, size*3, part.color, alpha*0.5);
+  if (part.pulse) { ctx.save(); ctx.translate(p.sx,p.sy); ctx.scale(1+Math.sin(part.life*10)*0.2,1+Math.sin(part.life*10)*0.2); ctx.translate(-p.sx,-p.sy); }
+  const color = rgba(part.color);
+  switch (part.shape) {
+    case 'circle': drawCircle(ctx, p.sx, p.sy, size, color); break;
+    case 'square': ctx.save(); ctx.translate(p.sx,p.sy); ctx.rotate(part.rotation); ctx.fillStyle=color; ctx.fillRect(-size,-size,size*2,size*2); ctx.restore(); break;
+    case 'star': ctx.save(); ctx.translate(p.sx,p.sy); ctx.rotate(part.rotation); drawStar(ctx,0,0,5,size,size*0.4,color); ctx.restore(); break;
+    case 'triangle': drawTriangle(ctx, p.sx, p.sy, size, color, part.rotation); break;
+    case 'ring': drawCircle(ctx, p.sx, p.sy, size, '', color, 2); break;
+    case 'spark': ctx.beginPath(); ctx.moveTo(p.sx-size*2,p.sy); ctx.lineTo(p.sx,p.sy-size*0.3); ctx.lineTo(p.sx+size*2,p.sy); ctx.lineTo(p.sx,p.sy+size*0.3); ctx.closePath(); ctx.fillStyle=color; ctx.fill(); break;
+    case 'hex': drawHexagon(ctx, p.sx, p.sy, size, color, part.rotation); break;
+  }
+  if (part.pulse) ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// RENDER PICKUP
+// ============================================================
+function renderPickup(ctx, item, cam, cw, ch, time) {
+  if (item.collected) return;
+  const bob = Math.sin(time*3+item.bobTimer)*5;
+  const p = worldToScreen(item.x, item.y, item.z+5+bob, cam, cw, ch);
+  const s = cam.zoom;
+  drawShadow(ctx, p.sx, p.sy+20*s, 8*s, 4*s, 0.2);
+  const glow = Math.sin(time*4+item.bobTimer)*0.2+item.glowIntensity;
+  drawGlow(ctx, p.sx, p.sy, 20*s, item.color, glow);
+  switch (item.type) {
+    case 'health':
+      ctx.fillStyle = rgba(item.color); ctx.beginPath();
+      ctx.moveTo(p.sx, p.sy+5*s); ctx.bezierCurveTo(p.sx-10*s,p.sy-5*s,p.sx-10*s,p.sy-12*s,p.sx,p.sy-7*s); ctx.bezierCurveTo(p.sx+10*s,p.sy-12*s,p.sx+10*s,p.sy-5*s,p.sx,p.sy+5*s); ctx.fill();
+      drawCircle(ctx, p.sx-3*s, p.sy-8*s, 2*s, 'rgba(255,255,255,0.5)'); break;
+    case 'mana':
+      ctx.beginPath(); ctx.moveTo(p.sx,p.sy-10*s); ctx.lineTo(p.sx+7*s,p.sy); ctx.lineTo(p.sx,p.sy+10*s); ctx.lineTo(p.sx-7*s,p.sy); ctx.closePath();
+      ctx.fillStyle = rgba(item.color); ctx.fill(); ctx.strokeStyle = rgba(lighten(item.color,80)); ctx.lineWidth = 1.5; ctx.stroke(); break;
+    case 'xp': drawStar(ctx, p.sx, p.sy, 5, 9*s, 4*s, rgba(item.color)); drawStar(ctx, p.sx, p.sy, 5, 5*s, 2*s, rgba(lighten(item.color,100))); break;
+    case 'gold': drawCircle(ctx, p.sx, p.sy, 8*s, rgba(item.color), rgba(darken(item.color,40)), 2); drawCircle(ctx, p.sx, p.sy, 5*s, rgba(lighten(item.color,60))); break;
+    default: drawCircle(ctx, p.sx, p.sy, 8*s, rgba(item.color)); break;
+  }
+}
+
+// ============================================================
+// RENDER DAMAGE TEXT
+// ============================================================
+function renderDamageText(ctx, dt) {
+  const lifeRatio = dt.life/dt.maxLife;
+  ctx.globalAlpha = lifeRatio;
+  const size = dt.isCrit ? dt.size*1.3 : dt.size;
+  ctx.font = `bold ${size}px Arial`; ctx.textAlign = 'center';
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 4;
+  ctx.strokeText(dt.text, dt.x, dt.y); ctx.fillStyle = dt.color; ctx.fillText(dt.text, dt.x, dt.y);
+  if (dt.isCrit) {
+    ctx.font = `bold ${size*0.5}px Arial`; ctx.fillStyle = '#FFD700';
+    ctx.strokeText('CRIT!', dt.x, dt.y-size); ctx.fillText('CRIT!', dt.x, dt.y-size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// UTILITY
+// ============================================================
+function dist(x1,y1,x2,y2) { return Math.sqrt((x2-x1)**2+(y2-y1)**2); }
+function angleTo(x1,y1,x2,y2) { return Math.atan2(y2-y1,x2-x1); }
+function lerp(a,b,t) { return a+(b-a)*t; }
+function clamp(v,mn,mx) { return Math.max(mn,Math.min(mx,v)); }
+function randomRange(min,max) { return min+Math.random()*(max-min); }
+function randomInt(min,max) { return Math.floor(randomRange(min,max+1)); }
+function randomColor(base,variance) {
+  return { r:clamp(base.r+randomRange(-variance,variance),0,255), g:clamp(base.g+randomRange(-variance,variance),0,255), b:clamp(base.b+randomRange(-variance,variance),0,255), a:base.a };
+}
+
+// ============================================================
+// SAVE / LOAD
+// ============================================================
+const SAVE_KEY = 'magic_arena_save_v2';
+function getDefaultSave() {
+  return { totalGold:0, highScore:0, bestWave:0, gamesPlayed:0, totalKills:0, homeUpgrades:{}, unlockedSpells:['fireball','iceShard','lightning','arcaneNova'], hatColorIndex:0, bodyColorIndex:0 };
+}
+function loadSave() {
+  try { const raw = localStorage.getItem(SAVE_KEY); if (raw) return {...getDefaultSave(),...JSON.parse(raw)}; } catch(e){}
+  return getDefaultSave();
+}
+function saveSave(data) {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(e){}
+}
+
+// ============================================================
+// COLORS
+// ============================================================
+const HAT_COLORS = [
+  {r:60,g:20,b:120},{r:180,g:30,b:30},{r:20,g:80,b:160},{r:20,g:130,b:50},{r:160,g:120,b:20},{r:30,g:30,b:30},{r:200,g:50,b:150},{r:255,g:100,b:0}
+];
+const BODY_COLORS = [
+  {r:80,g:50,b:160},{r:200,g:60,b:60},{r:50,g:100,b:200},{r:50,g:160,b:70},{r:200,g:160,b:40},{r:60,g:60,b:70},{r:220,g:80,b:170},{r:240,g:130,b:30}
+];
+
+// ============================================================
+// MAIN GAME CLASS
+// ============================================================
+class MagicArenaGame {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    this.saveData = loadSave();
+    this.state = 'home';
+    this.time = 0; this.deltaTime = 0; this.lastFrameTime = 0;
+    this.frameCount = 0; this.fps = 60;
+    this.arenaRadius = 450;
+    this.camera = { x:0, y:0, zoom:1, targetZoom:1, shake:0, shakeDecay:0.92, offsetX:0, offsetY:0 };
+    this.spells = []; this.selectedSpell = 0;
+    this.enemies = []; this.nextEnemyId = 0;
+    this.projectiles = []; this.particles = []; this.maxParticles = 500;
+    this.damageTexts = []; this.pickups = []; this.environment = [];
+    this.currentWave = 0; this.waveTimer = 0; this.waveDelay = 3;
+    this.waveClearTimer = 0; this.waveMessage = ''; this.waveMessageTimer = 0;
+    this.enemiesSpawned = 0; this.enemiesInWave = 0; this.spawnTimer = 0;
+    this.betweenWaves = false; this.currentWaveData = null;
+    this.stats = { totalKills:0, totalDamage:0, totalSpellsCast:0, highestCombo:0, wavesCompleted:0, timeAlive:0, bossesKilled:0, itemsCollected:0, totalGoldEarned:0 };
+    this.screenFlash = null; this.slowMotion = 1; this.slowMotionTimer = 0;
+    this.moveJoystick = { active:false, startX:0, startY:0, currentX:0, currentY:0, dx:0, dy:0, touchId:null };
+    this.aimJoystick = { active:false, startX:0, startY:0, currentX:0, currentY:0, dx:0, dy:0, touchId:null };
+    this.keys = {}; this.mouseX = 0; this.mouseY = 0; this.mouseDown = false;
+    this.fireButtonHeld = false; this.fireButtonTouchId = null; this.autoFireTimer = 0;
+    this.upgradeChoices = []; this.waveShopItems = []; this.homeShopScroll = 0;
+    this.homeMenuParticles = []; this.homeShopTab = 'spells';
+    this.sessionGold = 0; this.destroyed = false;
+    this.resize(); this.initAllSpells(); this.generateEnvironment(); this.resetPlayer(); this.initWaveShop(); this.initHomeParticles(); this.bindInput();
+    this.lastFrameTime = performance.now();
+    this.loop();
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    this.cw = window.innerWidth; this.ch = window.innerHeight;
+    this.canvas.width = this.cw*dpr; this.canvas.height = this.ch*dpr;
+    this.canvas.style.width = this.cw+'px'; this.canvas.style.height = this.ch+'px';
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const minDim = Math.min(this.cw, this.ch);
+    this.camera.targetZoom = Math.max(0.5, Math.min(1.2, minDim/700));
+  }
+
+  resetPlayer() {
+    const sd = this.saveData;
+    const hpBonus = (sd.homeUpgrades['perm_hp']||0)*20;
+    const manaBonus = (sd.homeUpgrades['perm_mana']||0)*15;
+    const spdBonus = 1+(sd.homeUpgrades['perm_speed']||0)*0.08;
+    const dmgBonus = 1+(sd.homeUpgrades['perm_damage']||0)*0.12;
+    const regenBonus = (sd.homeUpgrades['perm_regen']||0)*2;
+    const critBonus = (sd.homeUpgrades['perm_crit']||0)*0.05;
+    const shieldBonus = (sd.homeUpgrades['perm_shield']||0)*15;
+    const hi = sd.hatColorIndex||0; const bi = sd.bodyColorIndex||0;
+    this.player = {
+      x:0, y:0, z:0, radius:18,
+      hp:100+hpBonus, maxHp:100+hpBonus, mana:100+manaBonus, maxMana:100+manaBonus,
+      manaRegen:8+regenBonus, speed:160*spdBonus, angle:0, targetAngle:0,
+      xp:0, xpToLevel:50, level:1, score:0, gold:0,
+      combo:0, maxCombo:0, comboTimer:0, kills:0, spellsCast:0, damageDealt:0,
+      invincibleTimer:0, dashTimer:0, dashCooldown:0, dashDir:{x:0,y:0}, isDashing:false,
+      shield:shieldBonus, maxShield:shieldBonus, shieldRegenDelay:3, shieldRegenTimer:0,
+      orbAngle:0, bobTimer:0, walkTimer:0, isMoving:false,
+      hatColor:HAT_COLORS[hi%HAT_COLORS.length], bodyColor:BODY_COLORS[bi%BODY_COLORS.length],
+      staffGlow:0.5, critChance:0.1+critBonus, critMultiplier:2.0,
+      lifeSteal:(sd.homeUpgrades['perm_lifesteal']||0)*0.02, damageMultiplier:dmgBonus
+    };
+  }
+
+  initAllSpells() {
+    const sd = this.saveData;
+    this.spells = [
+      { type:'fireball', name:'Boule de feu', icon:'🔥', color:{r:255,g:100,b:20}, secondaryColor:{r:255,g:60,b:0}, damage:25, baseDamage:25, manaCost:15, cooldown:0.5, baseCooldown:0.5, currentCooldown:0, range:400, speed:350, aoe:0, description:'Boule de feu, enflamme les ennemis', unlocked:true, level:1, homeCost:0 },
+      { type:'iceShard', name:'Éclat de glace', icon:'❄️', color:{r:100,g:200,b:255}, secondaryColor:{r:180,g:230,b:255}, damage:18, baseDamage:18, manaCost:12, cooldown:0.35, baseCooldown:0.35, currentCooldown:0, range:350, speed:420, aoe:0, description:'Éclat rapide qui gèle', unlocked:true, level:1, homeCost:0 },
+      { type:'lightning', name:'Foudre', icon:'⚡', color:{r:255,g:255,b:80}, secondaryColor:{r:200,g:200,b:255}, damage:35, baseDamage:35, manaCost:25, cooldown:0.8, baseCooldown:0.8, currentCooldown:0, range:300, speed:600, aoe:0, description:'Éclair puissant, étourdit', unlocked:true, level:1, homeCost:0 },
+      { type:'arcaneNova', name:'Nova arcane', icon:'💫', color:{r:180,g:80,b:255}, secondaryColor:{r:220,g:150,b:255}, damage:40, baseDamage:40, manaCost:35, cooldown:2, baseCooldown:2, currentCooldown:0, range:0, speed:0, aoe:150, description:'Explosion AOE massive', unlocked:true, level:1, homeCost:0 },
+      { type:'voidBeam', name:'Rayon du vide', icon:'🌀', color:{r:100,g:0,b:180}, secondaryColor:{r:200,g:50,b:255}, damage:15, baseDamage:15, manaCost:20, cooldown:0.2, baseCooldown:0.2, currentCooldown:0, range:250, speed:500, aoe:0, description:'Tirs rapides perçants du vide', unlocked:sd.unlockedSpells.includes('voidBeam'), level:1, homeCost:200 },
+      { type:'healAura', name:'Aura de soin', icon:'💚', color:{r:50,g:255,b:100}, secondaryColor:{r:100,g:255,b:150}, damage:0, baseDamage:0, manaCost:40, cooldown:5, baseCooldown:5, currentCooldown:0, range:0, speed:0, aoe:100, description:'Soigne 30 PV', unlocked:sd.unlockedSpells.includes('healAura'), level:1, homeCost:150 },
+      { type:'meteor', name:'Météore', icon:'☄️', color:{r:255,g:80,b:0}, secondaryColor:{r:255,g:200,b:50}, damage:80, baseDamage:80, manaCost:50, cooldown:3.5, baseCooldown:3.5, currentCooldown:0, range:350, speed:250, aoe:120, description:'Météore dévastateur avec explosion', unlocked:sd.unlockedSpells.includes('meteor'), level:1, homeCost:400 },
+      { type:'poisonCloud', name:'Nuage poison', icon:'☠️', color:{r:80,g:200,b:50}, secondaryColor:{r:50,g:150,b:30}, damage:10, baseDamage:10, manaCost:30, cooldown:2, baseCooldown:2, currentCooldown:0, range:200, speed:150, aoe:100, description:'Zone de poison persistante', unlocked:sd.unlockedSpells.includes('poisonCloud'), level:1, homeCost:300 }
+    ];
+  }
+
+  initWaveShop() {
+    this.waveShopItems = [
+      { id:'hp_up', name:'PV +25', description:'+25 PV max', icon:'❤️', color:'#ff4444', cost:50, baseCost:50, level:0, maxLevel:20, apply:()=>{ this.player.maxHp+=25; this.player.hp=Math.min(this.player.hp+25,this.player.maxHp); } },
+      { id:'mana_up', name:'Mana +20', description:'+20 Mana max', icon:'💙', color:'#4488ff', cost:40, baseCost:40, level:0, maxLevel:20, apply:()=>{ this.player.maxMana+=20; this.player.mana=Math.min(this.player.mana+20,this.player.maxMana); } },
+      { id:'regen', name:'Régén +2', description:'Régén. mana', icon:'✨', color:'#8844ff', cost:60, baseCost:60, level:0, maxLevel:15, apply:()=>{ this.player.manaRegen+=2; } },
+      { id:'speed', name:'Vitesse +10%', description:'Plus rapide', icon:'👟', color:'#44ff44', cost:45, baseCost:45, level:0, maxLevel:15, apply:()=>{ this.player.speed*=1.10; } },
+      { id:'dmg', name:'Dégâts +15%', description:'Plus de dégâts', icon:'⚔️', color:'#ff8800', cost:80, baseCost:80, level:0, maxLevel:20, apply:()=>{ this.player.damageMultiplier+=0.15; } },
+      { id:'cd', name:'Cooldown -10%', description:'Sorts + rapides', icon:'⏱️', color:'#ffaa00', cost:70, baseCost:70, level:0, maxLevel:15, apply:()=>{ this.spells.forEach(s=>{ s.cooldown=s.baseCooldown*Math.pow(0.9,this.getWaveShopLevel('cd')+1); }); } },
+      { id:'crit', name:'Critique +5%', description:'Chance critique', icon:'💥', color:'#ff4488', cost:100, baseCost:100, level:0, maxLevel:10, apply:()=>{ this.player.critChance+=0.05; } },
+      { id:'shield', name:'Bouclier +20', description:'Bouclier magique', icon:'🛡️', color:'#44aaff', cost:75, baseCost:75, level:0, maxLevel:15, apply:()=>{ this.player.maxShield+=20; this.player.shield=this.player.maxShield; } },
+      { id:'steal', name:'Vol de vie +2%', description:'Soin sur attaque', icon:'🧛', color:'#aa2244', cost:120, baseCost:120, level:0, maxLevel:10, apply:()=>{ this.player.lifeSteal+=0.02; } },
+      { id:'heal', name:'Soin complet', description:'Restaure tout', icon:'🌟', color:'#ffdd00', cost:30, baseCost:30, level:0, maxLevel:999, apply:()=>{ this.player.hp=this.player.maxHp; this.player.mana=this.player.maxMana; this.player.shield=this.player.maxShield; } },
+    ];
+  }
+
+  getWaveShopLevel(id) { return this.waveShopItems.find(i=>i.id===id)?.level||0; }
+
+  buyWaveShopItem(index) {
+    const item = this.waveShopItems[index];
+    if (!item || item.level>=item.maxLevel || this.player.gold<item.cost) return;
+    this.player.gold-=item.cost; item.apply(); item.level++;
+    item.cost = Math.floor(item.baseCost*Math.pow(1.3,item.level));
+  }
+
+  getHomeShopItems() {
+    const sd = this.saveData;
+    return [
+      { id:'spell_voidBeam', name:'Rayon du vide', desc:'Tirs rapides perçants', icon:'🌀', color:'#8800ff', cost:200, level:sd.unlockedSpells.includes('voidBeam')?1:0, maxLevel:1, category:'spells' },
+      { id:'spell_healAura', name:'Aura de soin', desc:'Sort de soin AOE', icon:'💚', color:'#44ff88', cost:150, level:sd.unlockedSpells.includes('healAura')?1:0, maxLevel:1, category:'spells' },
+      { id:'spell_meteor', name:'Météore', desc:'Explosion dévastatrice', icon:'☄️', color:'#ff4400', cost:400, level:sd.unlockedSpells.includes('meteor')?1:0, maxLevel:1, category:'spells' },
+      { id:'spell_poisonCloud', name:'Nuage poison', desc:'Zone de dégâts', icon:'☠️', color:'#44cc22', cost:300, level:sd.unlockedSpells.includes('poisonCloud')?1:0, maxLevel:1, category:'spells' },
+      { id:'perm_hp', name:'PV permanent', desc:'+20 PV de départ', icon:'❤️', color:'#ff4444', cost:100+(sd.homeUpgrades['perm_hp']||0)*50, level:sd.homeUpgrades['perm_hp']||0, maxLevel:20, category:'upgrades' },
+      { id:'perm_mana', name:'Mana permanent', desc:'+15 Mana de départ', icon:'💙', color:'#4488ff', cost:80+(sd.homeUpgrades['perm_mana']||0)*40, level:sd.homeUpgrades['perm_mana']||0, maxLevel:20, category:'upgrades' },
+      { id:'perm_speed', name:'Vitesse permane.', desc:'+8% vitesse', icon:'👟', color:'#44ff44', cost:120+(sd.homeUpgrades['perm_speed']||0)*60, level:sd.homeUpgrades['perm_speed']||0, maxLevel:10, category:'upgrades' },
+      { id:'perm_damage', name:'Dégâts permanent', desc:'+12% dégâts', icon:'⚔️', color:'#ff8800', cost:150+(sd.homeUpgrades['perm_damage']||0)*75, level:sd.homeUpgrades['perm_damage']||0, maxLevel:15, category:'upgrades' },
+      { id:'perm_regen', name:'Régén permane.', desc:'+2 régén. mana', icon:'✨', color:'#aa44ff', cost:100+(sd.homeUpgrades['perm_regen']||0)*50, level:sd.homeUpgrades['perm_regen']||0, maxLevel:10, category:'upgrades' },
+      { id:'perm_crit', name:'Critique permane.', desc:'+5% crit', icon:'💥', color:'#ff4488', cost:200+(sd.homeUpgrades['perm_crit']||0)*100, level:sd.homeUpgrades['perm_crit']||0, maxLevel:10, category:'upgrades' },
+      { id:'perm_shield', name:'Bouclier perm.', desc:'+15 bouclier', icon:'🛡️', color:'#44aaff', cost:120+(sd.homeUpgrades['perm_shield']||0)*60, level:sd.homeUpgrades['perm_shield']||0, maxLevel:10, category:'upgrades' },
+      { id:'perm_lifesteal', name:'Vol de vie perm.', desc:'+2% vol de vie', icon:'🧛', color:'#cc2244', cost:250+(sd.homeUpgrades['perm_lifesteal']||0)*125, level:sd.homeUpgrades['perm_lifesteal']||0, maxLevel:8, category:'upgrades' },
+      ...HAT_COLORS.map((c,i)=>({ id:`hat_${i}`, name:`Chapeau ${['Violet','Rouge','Bleu','Vert','Or','Noir','Rose','Orange'][i]}`, desc:'Couleur du chapeau', icon:'🎩', color:rgba(c), cost:i===0?0:80+i*40, level:i===0||(sd.homeUpgrades[`hat_${i}`]||0)>0?1:0, maxLevel:1, category:'cosmetics' })),
+      ...BODY_COLORS.map((c,i)=>({ id:`body_${i}`, name:`Tenue ${['Violette','Rouge','Bleue','Verte','Dorée','Sombre','Rose','Orange'][i]}`, desc:'Couleur du corps', icon:'👘', color:rgba(c), cost:i===0?0:80+i*40, level:i===0||(sd.homeUpgrades[`body_${i}`]||0)>0?1:0, maxLevel:1, category:'cosmetics' })),
+    ];
+  }
+
+  buyHomeShopItem(id) {
+    const items = this.getHomeShopItems();
+    const item = items.find(i=>i.id===id);
+    if (!item || item.level>=item.maxLevel || this.saveData.totalGold<item.cost) return;
+    this.saveData.totalGold -= item.cost;
+    if (id.startsWith('spell_')) {
+      const spellType = id.replace('spell_','');
+      if (!this.saveData.unlockedSpells.includes(spellType)) this.saveData.unlockedSpells.push(spellType);
+    } else if (id.startsWith('hat_')) {
+      const idx = parseInt(id.replace('hat_',''));
+      this.saveData.homeUpgrades[id]=1; this.saveData.hatColorIndex=idx;
+    } else if (id.startsWith('body_')) {
+      const idx = parseInt(id.replace('body_',''));
+      this.saveData.homeUpgrades[id]=1; this.saveData.bodyColorIndex=idx;
+    } else {
+      this.saveData.homeUpgrades[id]=(this.saveData.homeUpgrades[id]||0)+1;
+    }
+    saveSave(this.saveData); this.initAllSpells(); this.resetPlayer();
+  }
+
+  selectCosmetic(id) {
+    if (id.startsWith('hat_')) {
+      const idx = parseInt(id.replace('hat_',''));
+      if (idx===0||(this.saveData.homeUpgrades[id]||0)>0) { this.saveData.hatColorIndex=idx; saveSave(this.saveData); this.resetPlayer(); }
+    } else if (id.startsWith('body_')) {
+      const idx = parseInt(id.replace('body_',''));
+      if (idx===0||(this.saveData.homeUpgrades[id]||0)>0) { this.saveData.bodyColorIndex=idx; saveSave(this.saveData); this.resetPlayer(); }
+    }
+  }
+
+  generateEnvironment() {
+    this.environment = [];
+    const types = ['pillar','crystal','torch','rock','mushroom','fountain'];
+    for (let i = 0; i < 25; i++) {
+      const angle = (i/25)*Math.PI*2+randomRange(-0.2,0.2);
+      const d = randomRange(this.arenaRadius*0.3, this.arenaRadius*0.85);
+      const type = types[i%types.length];
+      const colorMap = { pillar:{r:80,g:60,b:120}, crystal:{r:100+Math.random()*100,g:100+Math.random()*100,b:255}, torch:{r:100,g:60,b:30}, rock:{r:90,g:80,b:100}, mushroom:{r:200,g:50,b:80}, fountain:{r:80,g:70,b:120} };
+      this.environment.push({ x:Math.cos(angle)*d, y:Math.sin(angle)*d, z:0, type, color:colorMap[type], secondaryColor:{r:180,g:100,b:255}, scale:randomRange(0.8,1.2), rotation:randomRange(0,Math.PI*2), bobTimer:randomRange(0,Math.PI*2), glowIntensity:randomRange(0.3,0.8), radius:15 });
+    }
+  }
+
+  initHomeParticles() {
+    this.homeMenuParticles = [];
+    for (let i = 0; i < 60; i++) {
+      this.homeMenuParticles.push({ x:randomRange(0,this.cw), y:randomRange(0,this.ch), vx:randomRange(-20,20), vy:randomRange(-30,-10), size:randomRange(2,6), color:randomColor({r:150,g:80,b:255},60), life:randomRange(0.5,1) });
+    }
+  }
+
+  bindInput() {
+    this.canvas.addEventListener('touchstart', (e)=>this.onTouchStart(e), {passive:false});
+    this.canvas.addEventListener('touchmove', (e)=>this.onTouchMove(e), {passive:false});
+    this.canvas.addEventListener('touchend', (e)=>this.onTouchEnd(e), {passive:false});
+    this.canvas.addEventListener('touchcancel', (e)=>this.onTouchEnd(e), {passive:false});
+    this.canvas.addEventListener('mousedown', (e)=>this.onMouseDown(e));
+    this.canvas.addEventListener('mousemove', (e)=>this.onMouseMove(e));
+    this.canvas.addEventListener('mouseup', ()=>this.onMouseUp());
+    window.addEventListener('keydown', (e)=>{ this.keys[e.key.toLowerCase()]=true; });
+    window.addEventListener('keyup', (e)=>{ this.keys[e.key.toLowerCase()]=false; });
+    window.addEventListener('resize', ()=>this.resize());
+  }
+
+  isInFireButton(x,y) { return dist(x,y,this.cw-85,this.ch-120)<45; }
+  isInDashButton(x,y) { return dist(x,y,this.cw-85,this.ch-220)<30; }
+
+  onTouchStart(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i]; const x = touch.clientX, y = touch.clientY;
+      if (this.state==='home') { this.handleHomeClick(x,y); return; }
+      if (this.state==='homeShop') { this.handleHomeShopClick(x,y); return; }
+      if (this.state==='gameover') { this.handleGameOverClick(x,y); return; }
+      if (this.state==='upgrading') { this.handleUpgradeClick(x,y); return; }
+      if (this.state==='waveShop') { this.handleWaveShopClick(x,y); return; }
+      if (this.state==='playing') {
+        if (this.handleSpellButtonClick(x,y)) return;
+        if (this.isInFireButton(x,y)) { this.fireButtonHeld=true; this.fireButtonTouchId=touch.identifier; this.castSpell(); return; }
+        if (this.isInDashButton(x,y)) { this.dash(); return; }
+        if (x<this.cw*0.5) { if (!this.moveJoystick.active) this.moveJoystick={active:true,startX:x,startY:y,currentX:x,currentY:y,dx:0,dy:0,touchId:touch.identifier}; }
+        else if (!this.aimJoystick.active && y<this.ch-170) { this.aimJoystick={active:true,startX:x,startY:y,currentX:x,currentY:y,dx:0,dy:0,touchId:touch.identifier}; }
+      }
+    }
+  }
+
+  onTouchMove(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      const updateJs = (js) => {
+        js.currentX=touch.clientX; js.currentY=touch.clientY;
+        const dx=js.currentX-js.startX, dy=js.currentY-js.startY;
+        const d=Math.sqrt(dx*dx+dy*dy), maxD=60;
+        if (d>maxD) { js.dx=(dx/d)*maxD; js.dy=(dy/d)*maxD; } else { js.dx=dx; js.dy=dy; }
+      };
+      if (touch.identifier===this.moveJoystick.touchId) updateJs(this.moveJoystick);
+      if (touch.identifier===this.aimJoystick.touchId) updateJs(this.aimJoystick);
+    }
+  }
+
+  onTouchEnd(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const touch = e.changedTouches[i];
+      if (touch.identifier===this.moveJoystick.touchId) this.moveJoystick={active:false,startX:0,startY:0,currentX:0,currentY:0,dx:0,dy:0,touchId:null};
+      if (touch.identifier===this.aimJoystick.touchId) {
+        if (this.state==='playing') { const d=Math.sqrt(this.aimJoystick.dx**2+this.aimJoystick.dy**2); if (d>10) this.castSpell(); }
+        this.aimJoystick={active:false,startX:0,startY:0,currentX:0,currentY:0,dx:0,dy:0,touchId:null};
+      }
+      if (touch.identifier===this.fireButtonTouchId) { this.fireButtonHeld=false; this.fireButtonTouchId=null; }
+    }
+  }
+
+  onMouseDown(e) {
+    this.mouseX=e.clientX; this.mouseY=e.clientY; this.mouseDown=true;
+    if (this.state==='home') this.handleHomeClick(e.clientX,e.clientY);
+    else if (this.state==='homeShop') this.handleHomeShopClick(e.clientX,e.clientY);
+    else if (this.state==='gameover') this.handleGameOverClick(e.clientX,e.clientY);
+    else if (this.state==='upgrading') this.handleUpgradeClick(e.clientX,e.clientY);
+    else if (this.state==='waveShop') this.handleWaveShopClick(e.clientX,e.clientY);
+    else if (this.state==='playing') { if (!this.handleSpellButtonClick(e.clientX,e.clientY)) this.castSpell(); }
+  }
+  onMouseMove(e) { this.mouseX=e.clientX; this.mouseY=e.clientY; }
+  onMouseUp() { this.mouseDown=false; }
+
+  handleHomeClick(x,y) {
+    const btnW=Math.min(250,this.cw*0.5), btnH=55, btnX=(this.cw-btnW)/2;
+    const playY=this.ch*0.62;
+    if (x>=btnX&&x<=btnX+btnW&&y>=playY&&y<=playY+btnH) { this.startGame(); return; }
+    const shopY=this.ch*0.72;
+    if (x>=btnX&&x<=btnX+btnW&&y>=shopY&&y<=shopY+btnH) { this.state='homeShop'; this.homeShopTab='spells'; this.homeShopScroll=0; }
+  }
+
+  handleHomeShopClick(x,y) {
+    if (x<60&&y<50) { this.state='home'; return; }
+    const tabY=55, tabW=Math.min(100,this.cw/3.5);
+    const tabs=['spells','upgrades','cosmetics'];
+    const totalTabW=tabs.length*(tabW+6)-6;
+    const tabStartX=(this.cw-totalTabW)/2;
+    for (let i = 0; i < tabs.length; i++) {
+      const tx=tabStartX+i*(tabW+6);
+      if (x>=tx&&x<=tx+tabW&&y>=tabY&&y<=tabY+32) { this.homeShopTab=tabs[i]; this.homeShopScroll=0; return; }
+    }
+    const items=this.getHomeShopItems().filter(i=>i.category===this.homeShopTab);
+    const cardW=Math.min(140,(this.cw-50)/3), cardH=this.homeShopTab==='cosmetics'?100:115;
+    const cols=Math.max(2,Math.floor((this.cw-30)/(cardW+8))), spacing=8;
+    const gridW=cols*(cardW+spacing)-spacing;
+    const startX=(this.cw-gridW)/2, startY=100;
+    for (let i = 0; i < items.length; i++) {
+      const item=items[i], col=i%cols, row=Math.floor(i/cols);
+      const cx=startX+col*(cardW+spacing), cy=startY+row*(cardH+spacing)-this.homeShopScroll;
+      if (x>=cx&&x<=cx+cardW&&y>=cy&&y<=cy+cardH) {
+        if (item.level>=item.maxLevel) this.selectCosmetic(item.id); else this.buyHomeShopItem(item.id);
+        return;
+      }
+    }
+  }
+
+  handleGameOverClick(x,y) {
+    const btnW=Math.min(200,this.cw*0.45), btnH=50, btnX=(this.cw-btnW)/2;
+    const btnY=this.ch*0.72;
+    if (x>=btnX&&x<=btnX+btnW&&y>=btnY&&y<=btnY+btnH) { this.goHome(); return; }
+    const btn2Y=this.ch*0.82;
+    if (x>=btnX&&x<=btnX+btnW&&y>=btn2Y&&y<=btn2Y+btnH) { this.startGame(); }
+  }
+
+  handleSpellButtonClick(x,y) {
+    const unlockedSpells=this.spells.filter(s=>s.unlocked);
+    const btnSize=44, spacing=8;
+    const totalW=unlockedSpells.length*(btnSize+spacing)-spacing;
+    const startX=(this.cw-totalW)/2, btnY=this.ch-70;
+    for (let i = 0; i < unlockedSpells.length; i++) {
+      const bx=startX+i*(btnSize+spacing);
+      if (x>=bx&&x<=bx+btnSize&&y>=btnY&&y<=btnY+btnSize) { this.selectedSpell=this.spells.indexOf(unlockedSpells[i]); return true; }
+    }
+    return false;
+  }
+
+  handleWaveShopClick(x,y) {
+    const cW=200, cH=50, cX=(this.cw-cW)/2, cY=this.ch-75;
+    if (x>=cX&&x<=cX+cW&&y>=cY&&y<=cY+cH) { this.state='playing'; this.startNextWave(); return; }
+    const cardW=Math.min(130,(this.cw-50)/3), cardH=110;
+    const cols=Math.max(2,Math.floor((this.cw-30)/(cardW+8))), sp=8;
+    const gW=cols*(cardW+sp)-sp, sX=(this.cw-gW)/2, sY=108;
+    for (let i = 0; i < this.waveShopItems.length; i++) {
+      const col=i%cols, row=Math.floor(i/cols);
+      const cx=sX+col*(cardW+sp), cy=sY+row*(cardH+sp);
+      if (x>=cx&&x<=cx+cardW&&y>=cy&&y<=cy+cardH) { this.buyWaveShopItem(i); return; }
+    }
+  }
+
+  handleUpgradeClick(x,y) {
+    const cardW=150, cardH=190, sp=15;
+    const totalW=this.upgradeChoices.length*(cardW+sp)-sp;
+    const sX=(this.cw-totalW)/2, sY=(this.ch-cardH)/2;
+    for (let i = 0; i < this.upgradeChoices.length; i++) {
+      const cx=sX+i*(cardW+sp);
+      if (x>=cx&&x<=cx+cardW&&y>=sY&&y<=sY+cardH) { this.upgradeChoices[i].apply(); this.state='playing'; this.upgradeChoices=[]; return; }
+    }
+  }
+
+  startGame() {
+    this.state='playing'; this.initAllSpells(); this.resetPlayer();
+    this.enemies=[]; this.projectiles=[]; this.particles=[]; this.damageTexts=[]; this.pickups=[];
+    this.currentWave=0; this.waveTimer=1; this.betweenWaves=true; this.sessionGold=0;
+    this.stats={totalKills:0,totalDamage:0,totalSpellsCast:0,highestCombo:0,wavesCompleted:0,timeAlive:0,bossesKilled:0,itemsCollected:0,totalGoldEarned:0};
+    this.initWaveShop(); this.startNextWave();
+  }
+
+  goHome() { this.state='home'; this.initAllSpells(); this.resetPlayer(); }
+
+  gameOver() {
+    this.state='gameover';
+    this.screenFlash={color:{r:255,g:0,b:0},intensity:0.5,decay:0.02};
+    this.slowMotion=0.3; this.slowMotionTimer=1;
+    this.saveData.totalGold+=this.player.gold; this.saveData.gamesPlayed++; this.saveData.totalKills+=this.stats.totalKills;
+    if (this.player.score>this.saveData.highScore) this.saveData.highScore=this.player.score;
+    if (this.stats.wavesCompleted>this.saveData.bestWave) this.saveData.bestWave=this.stats.wavesCompleted;
+    saveSave(this.saveData);
+  }
+
+  generateWave(waveNum) {
+    const isBoss=waveNum%5===0;
+    const enemies=[];
+    const baseCount=Math.min(4+Math.floor(waveNum*1.1),35);
+    const available=['slime'];
+    if (waveNum>=2) available.push('bat');
+    if (waveNum>=4) available.push('ghost');
+    if (waveNum>=6) available.push('mushroom');
+    if (waveNum>=8) available.push('skeleton');
+    if (waveNum>=10) available.push('golem');
+    const perType=Math.max(1,Math.floor(baseCount/available.length));
+    for (const type of available) enemies.push({type, count:perType+randomInt(0,2)});
+    const bossTypes=['wizard','dragon','golem','wizard','dragon'];
+    const bossType=bossTypes[(Math.floor(waveNum/5)-1)%bossTypes.length];
+    return { number:waveNum, enemies, isBossWave:isBoss, bossType:isBoss?bossType:undefined, spawnDelay:Math.max(0.2,1.5-waveNum*0.03), message:isBoss?`⚠️ BOSS - VAGUE ${waveNum} ⚠️`:`Vague ${waveNum}` };
+  }
+
+  startNextWave() {
+    this.currentWave++; this.currentWaveData=this.generateWave(this.currentWave);
+    this.waveMessage=this.currentWaveData.message; this.waveMessageTimer=3;
+    this.enemiesSpawned=0; this.enemiesInWave=this.currentWaveData.enemies.reduce((sum,e)=>sum+e.count,0);
+    if (this.currentWaveData.isBossWave) this.enemiesInWave++;
+    this.spawnTimer=0; this.betweenWaves=false;
+    if (this.currentWaveData.isBossWave) { this.camera.targetZoom=this.camera.zoom*0.85; this.screenFlash={color:{r:255,g:50,b:50},intensity:0.3,decay:0.02}; }
+  }
+
+  updateWaveSpawning(dt) {
+    if (this.betweenWaves) { this.waveTimer-=dt; if (this.waveTimer<=0) this.startNextWave(); return; }
+    if (!this.currentWaveData) return;
+    const wave=this.currentWaveData;
+    this.spawnTimer-=dt;
+    if (this.spawnTimer<=0&&this.enemiesSpawned<this.enemiesInWave) {
+      this.spawnTimer=wave.spawnDelay;
+      let spawnedBoss=false;
+      if (wave.isBossWave&&this.enemiesSpawned===0) { this.spawnEnemy(wave.bossType||'wizard',true); spawnedBoss=true; }
+      if (!spawnedBoss) {
+        const available=wave.enemies.filter(e=>e.count>0);
+        if (available.length>0) { const pick=available[randomInt(0,available.length-1)]; this.spawnEnemy(pick.type,false); pick.count--; }
+      }
+      this.enemiesSpawned++;
+    }
+    if (this.enemiesSpawned>=this.enemiesInWave&&this.enemies.filter(e=>!e.isDead).length===0) {
+      this.waveClearTimer+=dt;
+      if (this.waveClearTimer>1) {
+        this.waveClearTimer=0; this.stats.wavesCompleted++; this.betweenWaves=true; this.waveTimer=3;
+        this.waveMessage=`✨ Vague ${this.currentWave} terminée !`; this.waveMessageTimer=2;
+        const minDim=Math.min(this.cw,this.ch); this.camera.targetZoom=Math.max(0.5,Math.min(1.2,minDim/700));
+        for (let i = 0; i < 3; i++) { const angle=randomRange(0,Math.PI*2); const d=randomRange(50,150); this.spawnPickup(this.player.x+Math.cos(angle)*d, this.player.y+Math.sin(angle)*d, (['health','mana','gold'])[i]); }
+        const waveGold=10+this.currentWave*5; this.player.gold+=waveGold; this.stats.totalGoldEarned+=waveGold;
+        this.addDamageText(this.player.x, this.player.y-30, `+${waveGold} 🪙`, '#FFD700', false);
+        this.state='waveShop';
+        if (this.currentWave%3===0) this.showUpgradeScreen();
+      }
+    }
+  }
+
+  spawnEnemy(type, isBoss) {
+    const angle=randomRange(0,Math.PI*2); const d=randomRange(this.arenaRadius*0.6,this.arenaRadius*0.9);
+    const x=Math.cos(angle)*d, y=Math.sin(angle)*d;
+    const configs = {
+      slime:{radius:16,hp:40,maxHp:40,speed:60,damage:8,color:{r:50,g:200,b:80},secondaryColor:{r:80,g:255,b:100},eyeColor:{r:255,g:255,b:255},xpValue:10,scoreValue:50,goldValue:5,attackCooldown:1.5,canShoot:false,canTeleport:false,chargeSpeed:0},
+      bat:{radius:12,hp:25,maxHp:25,speed:120,damage:6,color:{r:80,g:40,b:100},secondaryColor:{r:120,g:60,b:150},eyeColor:{r:255,g:50,b:50},xpValue:12,scoreValue:60,goldValue:6,attackCooldown:1,canShoot:false,canTeleport:false,chargeSpeed:200},
+      ghost:{radius:15,hp:35,maxHp:35,speed:70,damage:10,color:{r:180,g:180,b:220},secondaryColor:{r:200,g:200,b:255},eyeColor:{r:100,g:100,b:255},xpValue:15,scoreValue:80,goldValue:8,attackCooldown:2,canShoot:true,canTeleport:true,chargeSpeed:0},
+      golem:{radius:22,hp:120,maxHp:120,speed:40,damage:20,color:{r:120,g:100,b:80},secondaryColor:{r:150,g:130,b:100},eyeColor:{r:255,g:150,b:50},xpValue:25,scoreValue:120,goldValue:15,attackCooldown:2.5,canShoot:false,canTeleport:false,chargeSpeed:180},
+      skeleton:{radius:14,hp:45,maxHp:45,speed:90,damage:12,color:{r:220,g:200,b:170},secondaryColor:{r:200,g:180,b:150},eyeColor:{r:50,g:255,b:50},xpValue:18,scoreValue:90,goldValue:10,attackCooldown:1.2,canShoot:false,canTeleport:false,chargeSpeed:0},
+      mushroom:{radius:14,hp:30,maxHp:30,speed:50,damage:5,color:{r:200,g:60,b:80},secondaryColor:{r:150,g:50,b:60},eyeColor:{r:255,g:255,b:255},xpValue:10,scoreValue:55,goldValue:7,attackCooldown:3,canShoot:true,canTeleport:false,chargeSpeed:0},
+      wizard:{radius:20,hp:300,maxHp:300,speed:55,damage:15,color:{r:80,g:20,b:120},secondaryColor:{r:120,g:40,b:180},eyeColor:{r:255,g:50,b:50},xpValue:100,scoreValue:500,goldValue:80,attackCooldown:1.5,canShoot:true,canTeleport:true,chargeSpeed:0},
+      dragon:{radius:25,hp:500,maxHp:500,speed:50,damage:25,color:{r:200,g:50,b:30},secondaryColor:{r:255,g:100,b:50},eyeColor:{r:255,g:200,b:50},xpValue:150,scoreValue:800,goldValue:120,attackCooldown:2,canShoot:true,canTeleport:false,chargeSpeed:250},
+    };
+    const config=configs[type]||configs.slime;
+    const wMult=1+this.currentWave*0.08; const bMult=isBoss?3:1;
+    const enemy = {
+      id:this.nextEnemyId++, type, x, y, z:0,
+      radius:(config.radius)*(isBoss?1.5:1),
+      hp:config.hp*wMult*bMult, maxHp:config.maxHp*wMult*bMult,
+      speed:config.speed*(isBoss?0.8:1), damage:config.damage*wMult*(isBoss?1.5:1),
+      angle:angleTo(x,y,this.player.x,this.player.y),
+      color:config.color, secondaryColor:config.secondaryColor, eyeColor:config.eyeColor,
+      xpValue:config.xpValue*(isBoss?5:1), scoreValue:config.scoreValue*(isBoss?5:1), goldValue:config.goldValue*(isBoss?10:1),
+      attackCooldown:config.attackCooldown, attackTimer:0,
+      state:'chase', stateTimer:0, bobTimer:randomRange(0,Math.PI*2), hitFlash:0, isBoss, scale:isBoss?1.5:1,
+      canShoot:config.canShoot, canTeleport:config.canTeleport, shootTimer:0,
+      chargeSpeed:config.chargeSpeed, pattern:0, patternTimer:0,
+      spawnAnim:0, deathAnim:1, isDead:false,
+      frozen:false, frozenTimer:0, burning:false, burnTimer:0, burnDamage:0,
+      stunned:false, stunTimer:0, healthBarVisible:0
+    };
+    this.enemies.push(enemy);
+    for (let i = 0; i < 15; i++) this.spawnParticle(x+randomRange(-20,20),y+randomRange(-20,20),randomRange(0,20),randomRange(-50,50),randomRange(-50,50),randomRange(30,80),randomColor(enemy.color,30),randomRange(2,5),randomRange(0.5,1),'circle',true,false);
+  }
+
+  castSpell() {
+    const spell=this.spells[this.selectedSpell];
+    if (!spell||!spell.unlocked||spell.currentCooldown>0||this.player.mana<spell.manaCost) return;
+    this.player.mana-=spell.manaCost; spell.currentCooldown=spell.cooldown;
+    this.player.spellsCast++; this.stats.totalSpellsCast++; this.player.staffGlow=1.5;
+    let aimAngle=this.player.angle;
+    if (this.aimJoystick.active) { const d=Math.sqrt(this.aimJoystick.dx**2+this.aimJoystick.dy**2); if (d>5) aimAngle=Math.atan2(this.aimJoystick.dy,this.aimJoystick.dx); }
+    else if (!this.isTouchDevice) { const wp=this.screenToWorldPos(this.mouseX,this.mouseY); aimAngle=angleTo(this.player.x,this.player.y,wp.x,wp.y); }
+    else { const nearest=this.findNearestEnemy(); if (nearest) aimAngle=angleTo(this.player.x,this.player.y,nearest.x,nearest.y); else if (this.moveJoystick.active) { const d=Math.sqrt(this.moveJoystick.dx**2+this.moveJoystick.dy**2); if (d>5) aimAngle=Math.atan2(this.moveJoystick.dy,this.moveJoystick.dx); } }
+    this.player.angle=aimAngle;
+    const dmg=spell.damage*this.player.damageMultiplier;
+    if (spell.type==='arcaneNova'||spell.type==='poisonCloud') {
+      const px=spell.type==='poisonCloud'?this.player.x+Math.cos(aimAngle)*120:this.player.x;
+      const py=spell.type==='poisonCloud'?this.player.y+Math.sin(aimAngle)*120:this.player.y;
+      this.projectiles.push({x:px,y:py,z:10,vx:0,vy:0,vz:0,spell:spell.type,damage:dmg*(1+this.player.level*0.1),radius:10,color:spell.color,secondaryColor:spell.secondaryColor,life:spell.type==='poisonCloud'?3:0.6,maxLife:spell.type==='poisonCloud'?3:0.6,trail:[],aoe:spell.​​​​​​​​​​​​​​​​
 
